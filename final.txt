@@ -1,0 +1,416 @@
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_ADXL345_U.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <TinyGPS++.h>
+#include <SoftwareSerial.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <SPI.h>
+#include <MFRC522.h>
+
+// Accelerometer
+Adafruit_ADXL345_Unified accelerometer = Adafruit_ADXL345_Unified();
+const float TILT_THRESHOLD = 45.0;
+const float JERK_THRESHOLD = 15.0;
+const unsigned long JERK_INTERVAL = 200;
+const unsigned long ACCIDENT_DURATION = 1000;
+const float X_AXIS_OFFSET = 10.0;
+float previousX = 0.0;
+float previousY = 0.0;
+float previousZ = 0.0;
+unsigned long previousMillis = 0;
+unsigned long accidentStartMillis = 0;
+bool accidentDetected = false;
+bool tiltDetected = false;
+bool lastTiltDetected = false;
+bool lastAccidentDetected = false;
+
+// GPS
+TinyGPSPlus gps;
+SoftwareSerial gpsSerial(D6, D5); // RX, TX
+
+// Temperature and Flame Sensor
+OneWire oneWire(D3);
+DallasTemperature sensors(&oneWire);
+const float tempThreshold = 35.0;
+bool lastTemperatureTriggered = false;
+bool lastFlameDetected = false;
+
+// RFID RC522
+#define RST_PIN D0
+#define SS_PIN D1
+MFRC522 rfid(SS_PIN, RST_PIN); // Create instance of the RC522 module
+bool lastTagDetected = false;
+
+// Pins
+const int LED_PIN = D8;
+const int BUZZER_PIN = D7;
+const int FLAME_SENSOR_PIN = D4;
+
+// WiFi and Server Details
+const char* ssid = "LORD-KRATOS";
+const char* password = "999999999";
+const char* temperatureServerUrl = "https://server-4i4l.onrender.com/temperature-alert";
+const char* flameServerUrl = "https://server-4i4l.onrender.com/flame-alert";
+const char* gpsServerUrl = "https://server-4i4l.onrender.com/gps-data";
+const char* alertServerUrl = "https://server-4i4l.onrender.com/adxl-alert";
+const char* rfidServerUrl = "https://server-4i4l.onrender.com/rfid-alert";
+WiFiClientSecure client;
+
+bool setupComplete = false;  // Flag to indicate if setup is complete
+bool initialReadingDone = false;  // Flag to indicate if initial accelerometer reading is done
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize Accelerometer
+  if (!accelerometer.begin()) {
+    Serial.println("Failed to initialize ADXL345.");
+    while (1);
+  }
+  accelerometer.setRange(ADXL345_RANGE_2_G);
+
+  // Initialize GPS
+  gpsSerial.begin(9600);
+
+  // Initialize Temperature Sensor
+  sensors.begin();
+
+  // Initialize Wi-Fi
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("Connected to WiFi");
+
+  // Initialize RFID
+  SPI.begin();
+  rfid.PCD_Init();
+
+  // Initialize Pins
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(FLAME_SENSOR_PIN, INPUT);
+
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  // Set the client to be insecure (skip SSL validation) for simplicity
+  client.setInsecure();
+
+  setupComplete = true;  // Mark setup as complete
+}
+
+void loop() {
+  if (!setupComplete) {
+    return;
+  }
+
+  bool triggerBuzzer = false;
+
+  // Read GPS Data
+  while (gpsSerial.available() > 0) {
+    gps.encode(gpsSerial.read());
+
+    if (gps.location.isUpdated() && gps.location.isValid()) {
+      float latitude = gps.location.lat();
+      float longitude = gps.location.lng();
+      float altitude = gps.altitude.meters();
+      float speed = gps.speed.kmph();
+
+      Serial.print("GPS Data: ");
+      Serial.print("Lat: "); Serial.print(latitude, 6);
+      Serial.print(", Lon: "); Serial.print(longitude, 6);
+      Serial.print(", Alt: "); Serial.print(altitude);
+      Serial.print(", Speed: "); Serial.println(speed);
+
+      sendGpsDataToServer(latitude, longitude, altitude, speed);
+    }
+  }
+
+  // Read RFID Data
+  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    String uid = "";
+    for (byte i = 0; i < rfid.uid.size; i++) {
+      uid += String(rfid.uid.uidByte[i] < 0x10 ? "0" : "");
+      uid += String(rfid.uid.uidByte[i], HEX);
+    }
+    uid.toUpperCase();
+    Serial.print("RFID Tag detected: ");
+    Serial.println(uid);
+
+    sendRfidDataToServer(uid);
+    lastTagDetected = true;
+    rfid.PICC_HaltA();
+  }
+
+  // Read Accelerometer Data
+  sensors_event_t event;
+  accelerometer.getEvent(&event);
+
+  float x = event.acceleration.x;
+  float y = event.acceleration.y;
+  float z = event.acceleration.z;
+  float angleX = atan2(y, z) * 180.0 / PI + X_AXIS_OFFSET;
+  float angleY = atan2(x, z) * 180.0 / PI;
+
+  if (angleX > 90) angleX -= 180;
+  if (angleX < -90) angleX += 180;
+
+  if (angleY > 90) angleY -= 180;
+  if (angleY < -90) angleY += 180;
+
+  bool newTiltDetected = (abs(angleX) >= TILT_THRESHOLD) || (abs(angleY) >= TILT_THRESHOLD);
+
+  unsigned long currentMillis = millis();
+  bool newJerkDetected = false;
+
+  if (!initialReadingDone) {
+    previousX = x;
+    previousY = y;
+    previousZ = z;
+    initialReadingDone = true;
+  }
+
+  if (currentMillis - previousMillis >= JERK_INTERVAL) {
+    float deltaX = x - previousX;
+    float deltaY = y - previousY;
+    float deltaZ = z - previousZ;
+
+    float jerkX = deltaX / JERK_INTERVAL * 1000;
+    float jerkY = deltaY / JERK_INTERVAL * 1000;
+    float jerkZ = deltaZ / JERK_INTERVAL * 1000;
+
+    newJerkDetected = (abs(jerkX) > JERK_THRESHOLD) || (abs(jerkY) > JERK_THRESHOLD) || (abs(jerkZ) > JERK_THRESHOLD);
+
+    previousX = x;
+    previousY = y;
+    previousZ = z;
+    previousMillis = currentMillis;
+  }
+
+  if (newJerkDetected) {
+    accidentStartMillis = currentMillis;
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(1000);
+    digitalWrite(BUZZER_PIN, LOW);
+    accidentDetected = true;
+  } else {
+    if (accidentDetected && currentMillis - accidentStartMillis >= ACCIDENT_DURATION) {
+      accidentDetected = false;
+    }
+  }
+
+  if (newTiltDetected && !accidentDetected) {
+    triggerBuzzer = true;
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(1000);
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  if (accidentDetected || newTiltDetected) {
+    digitalWrite(LED_PIN, HIGH);
+  } else {
+    digitalWrite(LED_PIN, LOW);
+  }
+
+  // Read Temperature and Flame Sensor
+  float temperature = readTemperature();
+  bool flameDetected = digitalRead(FLAME_SENSOR_PIN) == LOW;
+
+  if (temperature > tempThreshold) {
+    triggerBuzzer = true;
+    if (!lastTemperatureTriggered) {
+      sendTemperatureDataToServer(temperature);
+      lastTemperatureTriggered = true;
+    }
+  } else {
+    if (lastTemperatureTriggered) {
+      sendNormalTemperatureDataToServer();
+      lastTemperatureTriggered = false;
+    }
+  }
+
+  if (flameDetected) {
+    triggerBuzzer = true;
+    if (!lastFlameDetected) {
+      sendFlameDataToServer();
+      lastFlameDetected = true;
+    }
+  } else {
+    if (lastFlameDetected) {
+      sendNormalFlameDataToServer();
+      lastFlameDetected = false;
+    }
+  }
+
+  if (triggerBuzzer) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(1000);
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  if (newTiltDetected != lastTiltDetected || accidentDetected != lastAccidentDetected) {
+    sendAdxlDataToServer(newTiltDetected, accidentDetected);
+    lastTiltDetected = newTiltDetected;
+    lastAccidentDetected = accidentDetected;
+  }
+
+  delay(100); 
+}
+
+float readTemperature() {
+  sensors.requestTemperatures();
+  return sensors.getTempCByIndex(0);
+}
+
+void sendRfidDataToServer(String uid) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(client, rfidServerUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    String jsonData = "{\"rfid\":\"" + uid + "\"}";
+    int httpResponseCode = http.POST(jsonData);
+
+    if (httpResponseCode > 0) {
+      Serial.println("RFID data sent successfully");
+    } else {
+      Serial.println("Error sending RFID data");
+    }
+    http.end();
+  }
+}
+
+void sendTemperatureDataToServer(float temperature) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(client, temperatureServerUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    String jsonData = "{\"temperature\":" + String(temperature) + "}";
+    int httpResponseCode = http.POST(jsonData);
+
+    if (httpResponseCode > 0) {
+      // Optional: Uncomment if you want to keep track of successful sends
+      // Serial.println("Temperature data sent successfully");
+    } else {
+      Serial.println("Error sending temperature data");
+    }
+
+    http.end();
+  }
+}
+
+void sendNormalTemperatureDataToServer() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(client, temperatureServerUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    String jsonData = "{\"temperature\":\"normal\"}";
+    int httpResponseCode = http.POST(jsonData);
+
+    if (httpResponseCode > 0) {
+      // Optional: Uncomment if you want to keep track of successful sends
+      // Serial.println("Temperature normal state sent successfully");
+    } else {
+      Serial.println("Error sending normal temperature state");
+    }
+
+    http.end();
+  }
+}
+
+void sendFlameDataToServer() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(client, flameServerUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    String jsonData = "{\"flameDetected\":true}";
+    int httpResponseCode = http.POST(jsonData);
+
+    if (httpResponseCode > 0) {
+      // Optional: Uncomment if you want to keep track of successful sends
+      // Serial.println("Flame data sent successfully");
+    } else {
+      Serial.println("Error sending flame data");
+    }
+
+    http.end();
+  }
+}
+
+void sendNormalFlameDataToServer() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(client, flameServerUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    String jsonData = "{\"flameDetected\":false}";
+    int httpResponseCode = http.POST(jsonData);
+
+    if (httpResponseCode > 0) {
+      // Optional: Uncomment if you want to keep track of successful sends
+      // Serial.println("Normal flame state sent successfully");
+    } else {
+      Serial.println("Error sending normal flame state");
+    }
+
+    http.end();
+  }
+}
+
+void sendGpsDataToServer(float latitude, float longitude, float altitude, float speed) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(client, gpsServerUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    String jsonData = "{\"latitude\":" + String(latitude, 6) + ",\"longitude\":" + String(longitude, 6) +
+                      ",\"altitude\":" + String(altitude) + ",\"speed\":" + String(speed) + "}";
+    int httpResponseCode = http.POST(jsonData);
+
+    if (httpResponseCode > 0) {
+      String payload = http.getString();
+      Serial.print("Response Payload: ");
+      Serial.println(payload);
+    } else {
+      Serial.print("Error sending GPS data, response code: ");
+      Serial.println(httpResponseCode);
+    }
+
+    http.end();
+  }
+}
+
+void sendAdxlDataToServer(bool tiltDetected, bool accidentDetected) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(client, alertServerUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    String payload = "{";
+    payload += "\"tiltDetected\":" + String(tiltDetected ? "true" : "false") + ",";
+    payload += "\"accidentDetected\":" + String(accidentDetected ? "true" : "false");
+    payload += "}";
+
+    int httpResponseCode = http.POST(payload);
+    if (httpResponseCode == HTTP_CODE_OK) {
+      // Optional: Uncomment if you want to keep track of successful sends
+      // Serial.println("Alert data sent successfully");
+    } else {
+      Serial.print("Failed to send alert data, response code: ");
+      Serial.println(httpResponseCode);
+    }
+    http.end();
+  } else {
+    Serial.println("WiFi not connected");
+  }
+}

@@ -131,7 +131,6 @@ app.post('/adxl-alert', (req, res) => {
     }
 });
 
-
 app.post('/rfid-alert', (req, res) => {
     const { rfidTagId } = req.body;
 

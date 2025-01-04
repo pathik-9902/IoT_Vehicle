@@ -18,7 +18,7 @@ function App() {
 
   useEffect(() => {
     // Initialize WebSocket connection
-    const ws = new ReconnectingWebSocket("wss://server-4i4l.onrender.com/");
+    const ws = new ReconnectingWebSocket("wss://iot-vehicle.onrender.com//");
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);

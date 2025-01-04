@@ -8,8 +8,6 @@
 #include <SoftwareSerial.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include <SPI.h>
-#include <MFRC522.h>
 
 // Accelerometer
 Adafruit_ADXL345_Unified accelerometer = Adafruit_ADXL345_Unified();
@@ -39,12 +37,6 @@ const float tempThreshold = 35.0;
 bool lastTemperatureTriggered = false;
 bool lastFlameDetected = false;
 
-// RFID RC522
-#define RST_PIN D0
-#define SS_PIN D1
-MFRC522 rfid(SS_PIN, RST_PIN); // Create instance of the RC522 module
-bool lastTagDetected = false;
-
 // Pins
 const int LED_PIN = D8;
 const int BUZZER_PIN = D7;
@@ -53,11 +45,10 @@ const int FLAME_SENSOR_PIN = D4;
 // WiFi and Server Details
 const char* ssid = "LORD-KRATOS";
 const char* password = "999999999";
-const char* temperatureServerUrl = "https://server-4i4l.onrender.com/temperature-alert";
-const char* flameServerUrl = "https://server-4i4l.onrender.com/flame-alert";
-const char* gpsServerUrl = "https://server-4i4l.onrender.com/gps-data";
-const char* alertServerUrl = "https://server-4i4l.onrender.com/adxl-alert";
-const char* rfidServerUrl = "https://server-4i4l.onrender.com/rfid-alert";
+const char* temperatureServerUrl = "https://iot-vehicle.onrender.com/temperature-alert";
+const char* flameServerUrl = "https://iot-vehicle.onrender.com/flame-alert";
+const char* gpsServerUrl = "https://iot-vehicle.onrender.com/gps-data";
+const char* alertServerUrl = "https://iot-vehicle.onrender.com/adxl-alert";
 WiFiClientSecure client;
 
 bool setupComplete = false;  // Flag to indicate if setup is complete
@@ -87,10 +78,6 @@ void setup() {
     Serial.print(".");
   }
   Serial.println("Connected to WiFi");
-
-  // Initialize RFID
-  SPI.begin();
-  rfid.PCD_Init();
 
   // Initialize Pins
   pinMode(LED_PIN, OUTPUT);
@@ -123,30 +110,16 @@ void loop() {
       float altitude = gps.altitude.meters();
       float speed = gps.speed.kmph();
 
+      // Debugging: Print GPS data to Serial Monitor
       Serial.print("GPS Data: ");
       Serial.print("Lat: "); Serial.print(latitude, 6);
       Serial.print(", Lon: "); Serial.print(longitude, 6);
       Serial.print(", Alt: "); Serial.print(altitude);
       Serial.print(", Speed: "); Serial.println(speed);
 
+      // Send GPS Data to Server
       sendGpsDataToServer(latitude, longitude, altitude, speed);
     }
-  }
-
-  // Read RFID Data
-  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-    String uid = "";
-    for (byte i = 0; i < rfid.uid.size; i++) {
-      uid += String(rfid.uid.uidByte[i] < 0x10 ? "0" : "");
-      uid += String(rfid.uid.uidByte[i], HEX);
-    }
-    uid.toUpperCase();
-    Serial.print("RFID Tag detected: ");
-    Serial.println(uid);
-
-    sendRfidDataToServer(uid);
-    lastTagDetected = true;
-    rfid.PICC_HaltA();
   }
 
   // Read Accelerometer Data
@@ -170,6 +143,7 @@ void loop() {
   unsigned long currentMillis = millis();
   bool newJerkDetected = false;
 
+  // Initialize previous values with current sensor readings if not already done
   if (!initialReadingDone) {
     previousX = x;
     previousY = y;
@@ -199,7 +173,7 @@ void loop() {
     digitalWrite(BUZZER_PIN, HIGH);
     delay(1000);
     digitalWrite(BUZZER_PIN, LOW);
-    accidentDetected = true;
+    accidentDetected = true;  // Mark accident as detected
   } else {
     if (accidentDetected && currentMillis - accidentStartMillis >= ACCIDENT_DURATION) {
       accidentDetected = false;
@@ -207,7 +181,7 @@ void loop() {
   }
 
   if (newTiltDetected && !accidentDetected) {
-    triggerBuzzer = true;
+    triggerBuzzer = true; // Trigger buzzer for tilt
     digitalWrite(BUZZER_PIN, HIGH);
     delay(1000);
     digitalWrite(BUZZER_PIN, LOW);
@@ -223,29 +197,31 @@ void loop() {
   float temperature = readTemperature();
   bool flameDetected = digitalRead(FLAME_SENSOR_PIN) == LOW;
 
+  // Handle temperature state changes
   if (temperature > tempThreshold) {
-    triggerBuzzer = true;
+    triggerBuzzer = true; // Trigger buzzer for temperature
     if (!lastTemperatureTriggered) {
-      sendTemperatureDataToServer(temperature);
-      lastTemperatureTriggered = true;
+      sendTemperatureDataToServer(temperature); // Send alert only on state change
+      lastTemperatureTriggered = true; // Update state
     }
   } else {
     if (lastTemperatureTriggered) {
-      sendNormalTemperatureDataToServer();
-      lastTemperatureTriggered = false;
+      sendNormalTemperatureDataToServer(); // Send normal state update
+      lastTemperatureTriggered = false; // Update state
     }
   }
 
+  // Handle flame state changes
   if (flameDetected) {
-    triggerBuzzer = true;
+    triggerBuzzer = true; // Trigger buzzer for flame
     if (!lastFlameDetected) {
-      sendFlameDataToServer();
-      lastFlameDetected = true;
+      sendFlameDataToServer(); // Send alert only on state change
+      lastFlameDetected = true; // Update state
     }
   } else {
     if (lastFlameDetected) {
-      sendNormalFlameDataToServer();
-      lastFlameDetected = false;
+      sendNormalFlameDataToServer(); // Send normal state update
+      lastFlameDetected = false; // Update state
     }
   }
 
@@ -255,36 +231,20 @@ void loop() {
     digitalWrite(BUZZER_PIN, LOW);
   }
 
+  // Send ADXL Data to Server
   if (newTiltDetected != lastTiltDetected || accidentDetected != lastAccidentDetected) {
     sendAdxlDataToServer(newTiltDetected, accidentDetected);
     lastTiltDetected = newTiltDetected;
     lastAccidentDetected = accidentDetected;
   }
 
+  // Shortened delay to improve responsiveness
   delay(100); 
 }
 
 float readTemperature() {
   sensors.requestTemperatures();
   return sensors.getTempCByIndex(0);
-}
-
-void sendRfidDataToServer(String uid) {
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-    http.begin(client, rfidServerUrl);
-    http.addHeader("Content-Type", "application/json");
-
-    String jsonData = "{\"rfid\":\"" + uid + "\"}";
-    int httpResponseCode = http.POST(jsonData);
-
-    if (httpResponseCode > 0) {
-      Serial.println("RFID data sent successfully");
-    } else {
-      Serial.println("Error sending RFID data");
-    }
-    http.end();
-  }
 }
 
 void sendTemperatureDataToServer(float temperature) {

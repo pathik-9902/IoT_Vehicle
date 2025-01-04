@@ -93,36 +93,44 @@ app.post('/flame-alert', (req, res) => {
 
 app.post('/adxl-alert', (req, res) => {
     const { tiltDetected, accidentDetected } = req.body;
+
+    if (tiltDetected === undefined && accidentDetected === undefined) {
+        return res.status(400).send('Invalid sensor data');
+    }
+
     let status = 'none';
+    let significantChange = false;
 
-    if (tiltDetected !== undefined || accidentDetected !== undefined) {
-        if (tiltDetected && !lastTiltDetected) {
-            status = 'tilt';
-        } else if (accidentDetected && !lastAccidentDetected) {
-            status = 'impact';
-        } else if (tiltDetected && accidentDetected && (!lastTiltDetected || !lastAccidentDetected)) {
-            status = 'both';
-        } else if (!tiltDetected && lastTiltDetected) {
-            status = 'tilt-normal';
-        } else if (!accidentDetected && lastAccidentDetected) {
-            status = 'impact-normal';
-        }
+    // Determine tilt state
+    if (tiltDetected && !lastTiltDetected) {
+        status = 'tilt';
+        significantChange = true;
+    } else if (!tiltDetected && lastTiltDetected) {
+        status = 'tilt-normal';
+        significantChange = true;
+    }
+    lastTiltDetected = tiltDetected;
 
-        lastTiltDetected = tiltDetected;
-        lastAccidentDetected = accidentDetected;
+    // Determine accident state
+    if (accidentDetected && !lastAccidentDetected) {
+        status = significantChange ? 'both' : 'impact';
+        significantChange = true;
+    } else if (!accidentDetected && lastAccidentDetected) {
+        status = 'impact-normal';
+        significantChange = true;
+    }
+    lastAccidentDetected = accidentDetected;
 
-        if (status !== 'none') {
-            sensorData.adxlData = { status };
-            console.log(`Collision status updated: ${status}`);
-            sendUpdateToClients();
-            res.json({ status });
-        } else {
-            res.status(200).send('No significant change');
-        }
+    if (significantChange) {
+        sensorData.adxlData = { status };
+        console.log(`ADXL Update: Tilt - ${tiltDetected}, Accident - ${accidentDetected}, Status - ${status}`);
+        sendUpdateToClients();
+        res.json({ status });
     } else {
-        res.status(400).send('Invalid sensor data');
+        res.status(200).send('No significant change');
     }
 });
+
 
 app.post('/rfid-alert', (req, res) => {
     const { rfidTagId } = req.body;

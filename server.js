@@ -43,9 +43,14 @@ function sendUpdateToClients() {
 function evaluateAccident() {
     const { gpsData, adxlData, flameData, temperatureData } = sensorData;
 
+    // Check if the vehicle is climbing a slope based on tilt angle.
+    const slopeThreshold = 30; // Degrees at which the slope is considered to be climbing, above this it could be an accident
+    const isClimbingSlope = adxlData?.tiltDetected && Math.abs(adxlData?.tiltAngle) < slopeThreshold;
+
+    // Do not trigger accident if the vehicle is climbing a slope.
     if (
         gpsData?.suddenStop ||
-        adxlData?.status === 'accident' ||
+        adxlData?.status === 'accident' && !isClimbingSlope || // Trigger only if accident detected and not climbing slope
         (flameData?.flameDetected && temperatureData?.temperature !== 'normal')
     ) {
         accidentConfirmed = true;
@@ -108,7 +113,7 @@ app.post('/flame-alert', (req, res) => {
 });
 
 app.post('/adxl-alert', (req, res) => {
-    const { tiltDetected, accidentDetected, impactForce } = req.body;
+    const { tiltDetected, accidentDetected, impactForce, tiltAngle } = req.body;
 
     if (tiltDetected === undefined && accidentDetected === undefined && impactForce === undefined) {
         return res.status(400).send('Invalid sensor data');
@@ -124,17 +129,25 @@ app.post('/adxl-alert', (req, res) => {
     }
 
     if (tiltDetected && !lastTiltDetected) {
-        status = 'tilt';
-        significantChange = true;
+        // Check if the tilt is above the slope threshold
+        if (Math.abs(tiltAngle) > 30) {
+            status = 'tilt';
+            significantChange = true;
+        } else {
+            // If tilt is less than threshold, it's considered a slope
+            status = 'slope';
+            significantChange = false; // No accident triggered for small tilt
+        }
     } else if (!tiltDetected && lastTiltDetected) {
         status = 'tilt-normal';
         significantChange = true;
     }
+    
     lastTiltDetected = tiltDetected;
 
-    if (accidentDetected && tiltDetected) {
-        sensorData.adxlData = { status: 'accident', impactForce, tiltDetected };
-        console.log(`Accident Detected: Impact - ${impactForce}, Tilt - ${tiltDetected}`);
+    if (accidentDetected && tiltDetected && Math.abs(tiltAngle) > 30) {
+        sensorData.adxlData = { status: 'accident', impactForce, tiltDetected, tiltAngle };
+        console.log(`Accident Detected: Impact - ${impactForce}, Tilt - ${tiltAngle}`);
     } else if (!accidentDetected && lastAccidentDetected) {
         status = 'impact-normal';
         significantChange = true;
@@ -143,8 +156,8 @@ app.post('/adxl-alert', (req, res) => {
     lastAccidentDetected = accidentDetected;
 
     if (significantChange) {
-        sensorData.adxlData = { status, impactForce, tiltDetected };
-        console.log(`ADXL Update: Impact - ${impactForce}, Tilt - ${tiltDetected}, Status - ${status}`);
+        sensorData.adxlData = { status, impactForce, tiltDetected, tiltAngle };
+        console.log(`ADXL Update: Impact - ${impactForce}, Tilt - ${tiltAngle}, Status - ${status}`);
     }
 
     evaluateAccident();

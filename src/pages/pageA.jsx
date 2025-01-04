@@ -1,15 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import './pageA.css'
-function PageA({ data }) {
-  const { gpsData, temperatureData, flameData, adxlData, historicalData } = data;
+import './pageA.css';
 
+function PageA({ data }) {
+  const { gpsData, temperatureData, flameData, adxlData, historicalData, accidentDetected } = data;
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
   const markerRef = useRef(null);
   const geofenceRef = useRef(null);
   const [message, setMessage] = useState('');
+  const [isAccident, setIsAccident] = useState(false);
 
   useEffect(() => {
     const mapElement = mapContainerRef.current;
@@ -91,6 +92,15 @@ function PageA({ data }) {
     };
   }, [gpsData]);
 
+  useEffect(() => {
+    if (accidentDetected) {
+      setIsAccident(true);
+      setMessage("Accident Detected! Please check the vehicle's status.");
+    } else {
+      setIsAccident(false);
+    }
+  }, [accidentDetected]);
+
   return (
     <div className="page-a-container">
       <h1>Page A</h1>
@@ -98,38 +108,48 @@ function PageA({ data }) {
         <div ref={mapContainerRef} className="map-container"></div>
         <div className="message">{message}</div>
       </div>
+
       <div className="data-section">
         <h2>GPS Data</h2>
         {gpsData ? (
           <div>
-            <p>Latitude: {gpsData.latitude}</p>
-            <p>Longitude: {gpsData.longitude}</p>
-            <p>Altitude: {gpsData.altitude}</p>
-            <p>Speed: {gpsData.speed} km/h</p>
-            <p>Accuracy: {calculateAccuracy(gpsData, historicalData)}</p>
+            <p><strong>Latitude:</strong> {gpsData.latitude}</p>
+            <p><strong>Longitude:</strong> {gpsData.longitude}</p>
+            <p><strong>Altitude:</strong> {gpsData.altitude}</p>
+            <p><strong>Speed:</strong> {gpsData.speed} km/h</p>
+            <p><strong>Accuracy:</strong> {calculateAccuracy(gpsData, historicalData)}</p>
           </div>
         ) : (
           <p>No GPS data available</p>
         )}
+
         <h2>Temperature Data</h2>
         {temperatureData ? (
-          <p>Temperature: {temperatureData.temperature}°C</p>
+          <p><strong>Temperature:</strong> {temperatureData.temperature}°C</p>
         ) : (
           <p>No temperature data available</p>
         )}
+
         <h2>Flame Data</h2>
         {flameData ? (
-          <p>Flame Detected: {flameData.flameDetected ? 'Yes' : 'No'}</p>
+          <p><strong>Flame Detected:</strong> {flameData.flameDetected ? 'Yes' : 'No'}</p>
         ) : (
           <p>No flame data available</p>
         )}
+
         <h2>Accelerometer Data</h2>
         {adxlData ? (
-          <p>Status: {adxlData.status}</p>
+          <p><strong>Status:</strong> {adxlData.status} || <strong>Accident Detected:</strong> {accidentDetected ? 'Yes' : 'No'}</p>
         ) : (
           <p>No accelerometer data available</p>
         )}
       </div>
+
+      {isAccident && (
+        <div className="accident-warning">
+          <p><strong>Alert:</strong> Accident detected. Please take immediate action!</p>
+        </div>
+      )}
     </div>
   );
 }
@@ -144,14 +164,14 @@ function calculateAccuracy(gpsData, historicalData = []) {
   }
 
   function haversineDistance(lat1, lon1, lat2, lon2) {
-    const R = 6371;
+    const R = 6371; // Radius of the Earth in kilometers
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
     const a = Math.sin(dLat / 2) ** 2 +
               Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
               Math.sin(dLon / 2) ** 2;
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c * 1000;
+    return R * c * 1000; // Distance in meters
   }
 
   const distances = historicalData.map(point =>

@@ -18,7 +18,7 @@ function App() {
 
   useEffect(() => {
     // Initialize WebSocket connection
-    const ws = new ReconnectingWebSocket("wss://iot-vehicle.onrender.com//");
+    const ws = new ReconnectingWebSocket("wss://iot-vehicle.onrender.com/");
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
@@ -39,7 +39,7 @@ function App() {
           <Routes>
             <Route path="/pageA" element={<PageA data={sensorData} />} />
             <Route path="/pageB" element={<PageB data={sensorData} />} />
-            <Route path="/pageC" element={<PageC data={sensorData} />} /> {/* Pass data to PageC */}
+            <Route path="/pageC" element={<PageC data={sensorData} />} />
             <Route path="/pageD" element={<PageD data={sensorData} />} />
           </Routes>
         </div>

@@ -11,8 +11,9 @@ app.use(cors());
 let lastTiltDetected = false;
 let lastAccidentDetected = false;
 let lastTemperatureTriggered = false;
-let lastFlameDetected = false;
 let lastRFIDDetected = null;
+
+let accidentConfirmed = false;
 
 let sensorData = {
     gpsData: null,
@@ -20,6 +21,7 @@ let sensorData = {
     flameData: null,
     adxlData: null,
     rfidData: null,
+    accidentDetected: false, // Flag for accident detection
 };
 
 const wss = new WebSocket.Server({ noServer: true });
@@ -38,12 +40,31 @@ function sendUpdateToClients() {
     });
 }
 
+function evaluateAccident() {
+    const { gpsData, adxlData, flameData, temperatureData } = sensorData;
+
+    if (
+        gpsData?.suddenStop ||
+        adxlData?.status === 'accident' ||
+        (flameData?.flameDetected && temperatureData?.temperature !== 'normal')
+    ) {
+        accidentConfirmed = true;
+        sensorData.accidentDetected = true;
+        console.log('Accident Confirmed based on sensor data.');
+    } else {
+        accidentConfirmed = false;
+        sensorData.accidentDetected = false;
+    }
+}
+
 app.post('/gps-data', (req, res) => {
     const { latitude, longitude, altitude, speed } = req.body;
 
     if (latitude !== undefined && longitude !== undefined && altitude !== undefined && speed !== undefined) {
-        sensorData.gpsData = { latitude, longitude, altitude, speed };
-        console.log(`GPS Data - Lat: ${latitude}, Lon: ${longitude}, Alt: ${altitude}, Speed: ${speed}`);
+        const suddenStop = speed < 5 && sensorData.gpsData && sensorData.gpsData.speed > 30; // Example threshold
+        sensorData.gpsData = { latitude, longitude, altitude, speed, suddenStop };
+        console.log(`GPS Data - Lat: ${latitude}, Lon: ${longitude}, Alt: ${altitude}, Speed: ${speed}, Sudden Stop: ${suddenStop}`);
+        evaluateAccident();
         sendUpdateToClients();
         res.status(200).send('GPS Data received');
     } else {
@@ -64,6 +85,7 @@ app.post('/temperature-alert', (req, res) => {
             lastTemperatureTriggered = false;
             console.log('Temperature normalized');
         }
+        evaluateAccident();
         sendUpdateToClients();
         res.status(200).send('Temperature data received');
     } else {
@@ -75,15 +97,9 @@ app.post('/flame-alert', (req, res) => {
     const { flameDetected } = req.body;
 
     if (typeof flameDetected === 'boolean') {
-        if (flameDetected && !lastFlameDetected) {
-            sensorData.flameData = { flameDetected };
-            lastFlameDetected = true;
-            console.log('Flame detected');
-        } else if (!flameDetected && lastFlameDetected) {
-            sensorData.flameData = { flameDetected: false };
-            lastFlameDetected = false;
-            console.log('Flame no longer detected');
-        }
+        sensorData.flameData = { flameDetected };
+        console.log(`Flame Detection: ${flameDetected}`);
+        evaluateAccident();
         sendUpdateToClients();
         res.status(200).send('Flame detection data received');
     } else {
@@ -92,16 +108,21 @@ app.post('/flame-alert', (req, res) => {
 });
 
 app.post('/adxl-alert', (req, res) => {
-    const { tiltDetected, accidentDetected } = req.body;
+    const { tiltDetected, accidentDetected, impactForce } = req.body;
 
-    if (tiltDetected === undefined && accidentDetected === undefined) {
+    if (tiltDetected === undefined && accidentDetected === undefined && impactForce === undefined) {
         return res.status(400).send('Invalid sensor data');
     }
 
     let status = 'none';
     let significantChange = false;
 
-    // Determine tilt state
+    if (impactForce !== undefined && impactForce > 5.0) { // Threshold for severe impact
+        accidentDetected = true;
+        status = 'impact';
+        significantChange = true;
+    }
+
     if (tiltDetected && !lastTiltDetected) {
         status = 'tilt';
         significantChange = true;
@@ -111,24 +132,24 @@ app.post('/adxl-alert', (req, res) => {
     }
     lastTiltDetected = tiltDetected;
 
-    // Determine accident state
-    if (accidentDetected && !lastAccidentDetected) {
-        status = significantChange ? 'both' : 'impact';
-        significantChange = true;
+    if (accidentDetected && tiltDetected) {
+        sensorData.adxlData = { status: 'accident', impactForce, tiltDetected };
+        console.log(`Accident Detected: Impact - ${impactForce}, Tilt - ${tiltDetected}`);
     } else if (!accidentDetected && lastAccidentDetected) {
         status = 'impact-normal';
         significantChange = true;
     }
+
     lastAccidentDetected = accidentDetected;
 
     if (significantChange) {
-        sensorData.adxlData = { status };
-        console.log(`ADXL Update: Tilt - ${tiltDetected}, Accident - ${accidentDetected}, Status - ${status}`);
-        sendUpdateToClients();
-        res.json({ status });
-    } else {
-        res.status(200).send('No significant change');
+        sensorData.adxlData = { status, impactForce, tiltDetected };
+        console.log(`ADXL Update: Impact - ${impactForce}, Tilt - ${tiltDetected}, Status - ${status}`);
     }
+
+    evaluateAccident();
+    sendUpdateToClients();
+    res.status(200).send('ADXL data processed');
 });
 
 app.post('/rfid-alert', (req, res) => {
